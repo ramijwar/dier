@@ -1,0 +1,91 @@
+name: Build Android Release ARM64 APK
+
+on:
+  push:
+    paths:
+      - 'deir_app-source.zip'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: 'Flutter version (leave empty for latest stable; must include Dart >=3.13.4)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Release APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Flutter project
+        run: |
+          unzip -q deir_app-source.zip -d "$RUNNER_TEMP/flutter-source"
+          test -f "$RUNNER_TEMP/flutter-source/deir_app/pubspec.yaml"
+          chmod +x "$RUNNER_TEMP/flutter-source/deir_app/android/gradlew"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter_version || '' }}
+          cache: true
+
+      - name: Prepare Android Kotlin plugin
+        # The archive disables built-in Kotlin but omits this plugin in the app.
+        # Fix the extracted copy only; keep the original archive unchanged.
+        working-directory: ${{ runner.temp }}/flutter-source/deir_app
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          properties = Path('android/gradle.properties').read_text()
+          gradle = Path('android/app/build.gradle.kts')
+          source = gradle.read_text()
+          plugin = 'id("org.jetbrains.kotlin.android")'
+          if 'android.builtInKotlin=false' in properties and plugin not in source:
+              anchor = 'id("com.android.application")'
+              if anchor not in source:
+                  raise SystemExit('Cannot locate the Android application plugin')
+              gradle.write_text(source.replace(anchor, anchor + '\n    ' + plugin, 1))
+          PY
+
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/flutter-source/deir_app
+        run: |
+          flutter --version
+          flutter pub get
+
+      - name: Build release APK for ARM64 only
+        working-directory: ${{ runner.temp }}/flutter-source/deir_app
+        run: flutter build apk --release --target-platform android-arm64 --split-per-abi
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: deir-services-release-arm64-v8a
+          path: ${{ runner.temp }}/flutter-source/deir_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
